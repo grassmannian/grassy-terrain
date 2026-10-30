@@ -1,0 +1,13 @@
+# Build outputs
+/build/
+/vendor/
+
+# jpm
+*.o
+*.a
+*.so
+*.meta.janet
+
+# Editor / OS
+*.swp
+.DS_Store

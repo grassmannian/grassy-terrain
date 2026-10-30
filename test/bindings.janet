@@ -45,6 +45,23 @@
 (check "bold flag" (get (get row 3) :bold) true)
 (check "bold color resolved" (get (get row 3) :fg) [204 102 102])
 (check "italic flag" (get (get row 10) :italic) true)
+(check "primary screen" (g/terminal-alternate-screen? t) false)
+(g/terminal-scroll-bottom t)
+
+# --- "greg" shift math ------------------------------------------------------
+# The renderer pins the cursor's active row to the top. Verify that the row at
+# that offset is the prompt and the row below it is blank.
+(def gt (g/terminal-new 20 5))
+(g/terminal-resize gt 20 5 8 16)
+(g/terminal-write gt "one\r\ntwo\r\nprompt> ")
+(def gr (g/render-new))
+(g/render-update gr gt)
+(def gcur (g/render-cursor gr))
+(def gshift (get gcur :y))
+(def grows (g/render-rows gr))
+(check "greg cursor row" gshift 2)
+(check "greg top row is prompt" (get (get (get grows gshift) 0) :text) "p")
+(check "greg row below is blank" (get (get (get grows (+ gshift 1)) 0) :text) nil)
 
 # --- key encoding -----------------------------------------------------------
 (def enc (g/key-encoder-new))

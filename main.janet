@@ -20,11 +20,38 @@
 (def padding 4)        # pixels between the window edge and the grid
 (def scrollback-lines 1000)
 (def wheel-scroll-rows 3)
+(def idle-seconds 0.10) # how long output must be quiet before "greg" kicks in
 
 (def root (or (os/getenv "GRASSY_ROOT") "."))
 (def font-path (string root "/assets/JetBrainsMono-Regular.ttf"))
 (def jaylib-path (or (os/getenv "GRASSY_JAYLIB")
                      (string (or (os/getenv "HOME") ".") "/source/jaylib/build/jaylib.so")))
+
+# ---------------------------------------------------------------------------
+# Configuration (config.json)
+#
+# The only key is "greg". When true, the shell's input line is pinned to the
+# top of the window once output goes quiet, leaving the rest of the screen
+# blank (as though `clear` ran after every command). Previous output remains
+# reachable through scrollback. When false the terminal behaves normally.
+# ---------------------------------------------------------------------------
+
+(defn read-greg []
+  (def path (string root "/config.json"))
+  (if (os/stat path)
+    (do
+      (def text (string (slurp path)))
+      (def idx (string/find "\"greg\"" text))
+      (if idx
+        (do
+          (def rest (string/slice text (+ idx 6)))
+          (def t (string/find "true" rest))
+          (def f (string/find "false" rest))
+          (if (and t (or (not f) (< t f))) true false))
+        false))
+    false))
+
+(def greg (read-greg))
 
 # ---------------------------------------------------------------------------
 # Raylib FFI shims
@@ -134,12 +161,14 @@
     (set cp (next-char)))
 
   (def mods (get-mods))
+  (var any-key false)
 
   (each [code gkw ucp] key-map
     (def pressed (key-pressed? code))
     (def repeated (if pressed false (key-repeat? code)))
     (def released (key-released? code))
     (when (or pressed repeated released)
+      (set any-key true)
       (def action (if released
                     (get g/key-actions :release)
                     (if pressed (get g/key-actions :press) (get g/key-actions :repeat))))
@@ -151,6 +180,9 @@
       (when text (set char-text ""))
       (def out (g/key-encode kenc term (get g/keys gkw) action mods ucp consumed text))
       (when out (g/pty-write fd out))))
+
+  # Typing snaps the viewport back to the prompt so the input line is visible.
+  (when any-key (g/terminal-scroll-bottom term))
 
   # Some platforms deliver the character a frame after the key press. If no
   # key event consumed the text, send it directly so input is not dropped.
@@ -287,6 +319,11 @@
   (var prev-focused (rl/window-focused?))
   (var child-exited false)
   (var child-status -1)
+  # "greg" state: the active-area row pinned to the top of the window and its
+  # absolute row (used to detect when it scrolls off into history).
+  (var last-output (os/time))
+  (var anchor nil)
+  (var anchor-abs 0)
 
   (while (not (rl/window-should-close))
     # Resize: reflow the terminal and tell the child about the new size.
@@ -315,7 +352,7 @@
       (def data (g/pty-read fd))
       (cond
         (= data :eof) (set child-exited true)
-        (buffer? data) (g/terminal-write term data)
+        (buffer? data) (do (g/terminal-write term data) (set last-output (os/time)))
         nil nil))
 
     # Reap the child once it has exited.
@@ -329,6 +366,36 @@
       (handle-mouse term menc fd))
 
     (g/render-update render term)
+
+    # --- "greg" prompt-at-top mode -----------------------------------------
+    # Once output has been quiet for a moment, pin the shell's input line to
+    # the top of the window. Rows above it (previous output) stay in the
+    # active area/scrollback and are reachable by scrolling up; rows below are
+    # left blank. Re-anchoring on each quiet frame keeps the newest prompt at
+    # the top after a command finishes.
+    (def cursor (g/render-cursor render))
+    (def sb (g/terminal-scrollbar term))
+    (def scrollback-count (if sb (- (sb :total) (sb :len)) 0))
+    (def at-bottom (if sb (>= (sb :offset) scrollback-count) true))
+
+    # If the anchored line has scrolled off into history, stop pinning it and
+    # fall back to normal rendering until the next prompt.
+    (when (and anchor (< anchor-abs scrollback-count))
+      (set anchor nil))
+
+    (def idle (and greg
+                   (not child-exited)
+                   (not (g/terminal-alternate-screen? term))
+                   (cursor :visible)
+                   (cursor :has-value)
+                   (> (- (os/time) last-output) idle-seconds)))
+
+    (when (and idle at-bottom)
+      (set anchor (cursor :y))
+      (set anchor-abs (+ scrollback-count (cursor :y))))
+
+    (def shift (if (and greg anchor at-bottom (> anchor 0)) anchor 0))
+
     (def colors (g/render-colors render))
     (def default-bg (get colors :bg))
     (def default-fg (get colors :fg))
@@ -338,30 +405,32 @@
 
     (def grid (g/render-rows render))
     (var y padding)
+    (var row-index 0)
     (each row grid
-      (var x padding)
-      (each cell row
-        (var fg (or (get cell :fg) default-fg))
-        (var bg (get cell :bg))
-        (when (get cell :inverse)
-          (def tmp fg)
-          (set fg (or bg default-bg))
-          (set bg tmp))
-        (when bg
-          (rl/draw-rectangle x y cell-w cell-h (rgb bg)))
-        (def text (get cell :text))
-        (when (and text (not (empty? text)))
-          (def offset (if (get cell :italic) (math/floor (/ font-size 6)) 0))
-          (rl/draw-text-ex font text [(+ x offset) y] font-size 0 (rgb fg))
-          (when (get cell :bold)
-            (rl/draw-text-ex font text [(+ x offset 1) y] font-size 0 (rgb fg))))
-        (+= x cell-w))
-      (+= y cell-h))
+      (when (>= row-index shift)
+        (var x padding)
+        (each cell row
+          (var fg (or (get cell :fg) default-fg))
+          (var bg (get cell :bg))
+          (when (get cell :inverse)
+            (def tmp fg)
+            (set fg (or bg default-bg))
+            (set bg tmp))
+          (when bg
+            (rl/draw-rectangle x y cell-w cell-h (rgb bg)))
+          (def text (get cell :text))
+          (when (and text (not (empty? text)))
+            (def offset (if (get cell :italic) (math/floor (/ font-size 6)) 0))
+            (rl/draw-text-ex font text [(+ x offset) y] font-size 0 (rgb fg))
+            (when (get cell :bold)
+              (rl/draw-text-ex font text [(+ x offset 1) y] font-size 0 (rgb fg))))
+          (+= x cell-w))
+        (+= y cell-h))
+      (+= row-index 1))
 
-    (def cursor (g/render-cursor render))
-    (when (and (cursor :visible) (cursor :has-value))
+    (when (and (cursor :visible) (cursor :has-value) (>= (cursor :y) shift))
       (def cx (+ padding (* (cursor :x) cell-w)))
-      (def cy (+ padding (* (cursor :y) cell-h)))
+      (def cy (+ padding (* (- (cursor :y) shift) cell-h)))
       (def cur-color (or (get colors :cursor) default-fg))
       (rl/draw-rectangle cx cy cell-w cell-h (rgb-a cur-color 0.5)))
 

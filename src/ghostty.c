@@ -541,6 +541,26 @@ static Janet cfun_terminal_cursor_visible(int32_t argc, Janet *argv) {
     return janet_wrap_boolean(v);
 }
 
+/* True while the alternate screen is active (vim, less, htop, ...). */
+static Janet cfun_terminal_alternate_screen(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 1);
+    TermCtx *ctx = janet_getabstract(argv, 0, &AT_Terminal);
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    if (ghostty_terminal_get(ctx->term, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
+                             &screen) != GHOSTTY_SUCCESS)
+        return janet_wrap_boolean(false);
+    return janet_wrap_boolean(screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE);
+}
+
+/* Scroll the viewport to the bottom (the active area). */
+static Janet cfun_terminal_scroll_bottom(int32_t argc, Janet *argv) {
+    janet_fixarity(argc, 1);
+    TermCtx *ctx = janet_getabstract(argv, 0, &AT_Terminal);
+    GhosttyTerminalScrollViewport sv = { .tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM };
+    ghostty_terminal_scroll_viewport(ctx->term, sv);
+    return janet_wrap_nil();
+}
+
 /* ------------------------------------------------------------------ */
 /* Key encoding                                                       */
 /* ------------------------------------------------------------------ */
@@ -875,6 +895,8 @@ static const JanetReg cfuns[] = {
     {"terminal-focus-event?", cfun_terminal_focus_event, "(ghostty/terminal-focus-event? term)"},
     {"terminal-scrollbar", cfun_terminal_scrollbar, "(ghostty/terminal-scrollbar term)"},
     {"terminal-cursor-visible?", cfun_terminal_cursor_visible, "(ghostty/terminal-cursor-visible? term)"},
+    {"terminal-alternate-screen?", cfun_terminal_alternate_screen, "(ghostty/terminal-alternate-screen? term)"},
+    {"terminal-scroll-bottom", cfun_terminal_scroll_bottom, "(ghostty/terminal-scroll-bottom term)"},
 
     {"key-encoder-new", cfun_key_encoder_new, "(ghostty/key-encoder-new)"},
     {"key-encode", cfun_key_encode, "(ghostty/key-encode enc term key action mods unshifted-cp consumed-mods text)"},
